@@ -1,0 +1,136 @@
+# CI Image (ci)
+
+FROM zephyr/teensy4_1_base
+
+ARG ZSDK_VERSION=0.16.5-1
+ENV ZSDK_VERSION=$ZSDK_VERSION
+ARG KITWARE_NINJA_VERSION=1.11.1.g95dee.kitware.jobserver-1
+ENV KITWARE_NINJA_VERSION=$KITWARE_NINJA_VERSION
+ARG CCACHE_VERSION=4.9.1
+ENV CCACHE_VERSION=$CCACHE_VERSION
+ARG DOXYGEN_VERSION=1.9.4
+ENV DOXYGEN_VERSION=$DOXYGEN_VERSION
+ARG RENODE_VERSION=1.14.0
+ENV RENODE_VERSION=$RENODE_VERSION
+ARG LLVM_VERSION=16
+ENV LLVM_VERSION=$LLVM_VERSION
+ARG BSIM_VERSION=v2.1
+ENV BSIM_VERSION=$BSIM_VERSION
+ARG SPARSE_VERSION=9212270048c3bd23f56c20a83d4f89b870b2b26e
+ENV SPARSE_VERSION=$SPARSE_VERSION
+ARG PROTOC_VERSION=21.7
+ENV PROTOC_VERSION=$PROTOC_VERSION
+ARG WGET_ARGS="-q --show-progress --progress=bar:force:noscroll"
+
+# Install Kitware ninja
+# NOTE: Pre-built Kitware ninja binaries are only available for x86_64 host.
+RUN if [ "${HOSTTYPE}" = "x86_64" ]; then \
+	wget ${WGET_ARGS} https://github.com/Kitware/ninja/releases/download/v${KITWARE_NINJA_VERSION}/ninja-${KITWARE_NINJA_VERSION}_x86_64-linux-gnu.tar.gz && \
+	tar xf ninja-${KITWARE_NINJA_VERSION}_x86_64-linux-gnu.tar.gz -C /opt && \
+	ln -nsf /opt/ninja-${KITWARE_NINJA_VERSION}_x86_64-linux-gnu/ninja /usr/local/bin && \
+	rm ninja-${KITWARE_NINJA_VERSION}_x86_64-linux-gnu.tar.gz \
+	; fi
+
+# Install ccache
+# NOTE: Pre-built ccache binaries are only available for x86_64 host.
+RUN if [ "${HOSTTYPE}" = "x86_64" ]; then \
+	wget ${WGET_ARGS} https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/ccache-${CCACHE_VERSION}-linux-x86_64.tar.xz && \
+	tar xf ccache-${CCACHE_VERSION}-linux-x86_64.tar.xz -C /opt && \
+	ln -nsf /opt/ccache-${CCACHE_VERSION}-linux-x86_64/ccache /usr/local/bin && \
+	rm ccache-${CCACHE_VERSION}-linux-x86_64.tar.xz \
+	; fi
+
+# Install Doxygen (x86 only)
+# NOTE: Pre-built Doxygen binaries are only available for x86_64 host.
+RUN if [ "${HOSTTYPE}" = "x86_64" ]; then \
+	wget ${WGET_ARGS} https://downloads.sourceforge.net/project/doxygen/rel-${DOXYGEN_VERSION}/doxygen-${DOXYGEN_VERSION}.linux.bin.tar.gz && \
+	tar xf doxygen-${DOXYGEN_VERSION}.linux.bin.tar.gz -C /opt && \
+	ln -nsf /opt/doxygen-${DOXYGEN_VERSION}/bin/doxygen /usr/local/bin && \
+	rm doxygen-${DOXYGEN_VERSION}.linux.bin.tar.gz \
+	; fi
+
+
+# Install renode (x86 only)
+# NOTE: Renode is currently only available for x86_64 host.
+RUN if [ "${HOSTTYPE}" = "x86_64" ]; then \
+	apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys 3FA7E0328081BFF6A14DA29AA6A19B38D3D831EF && \
+	echo "deb https://download.mono-project.com/repo/ubuntu stable-focal main" | tee /etc/apt/sources.list.d/mono-official-stable.list && \
+	apt-get -y update && \
+	wget ${WGET_ARGS} https://github.com/renode/renode/releases/download/v${RENODE_VERSION}/renode_${RENODE_VERSION}_amd64.deb && \
+	apt-get install -y ./renode_${RENODE_VERSION}_amd64.deb && \
+	rm renode_${RENODE_VERSION}_amd64.deb && \
+	pip3 install -r /opt/renode/tests/requirements.txt --no-cache-dir \
+	; fi
+
+# Install BSIM
+# Note: west needs an extra folder level, so we create a link to the old location to be backwards compatible
+RUN mkdir -p /opt/bsim_west && \
+	cd /opt/ && \
+	west init -m https://github.com/zephyrproject-rtos/babblesim-manifest.git --mr ${BSIM_VERSION} bsim_west && \
+	cd bsim_west/bsim && \
+	west update && \
+	make everything -j 8 && \
+	echo ${BSIM_VERSION} > ./version && \
+	chmod ag+w . -R && \
+	ln -nsf /opt/bsim_west/bsim /opt/bsim
+
+# Install cargo environment
+RUN wget -q -O-  "https://sh.rustup.rs" | sh -s -- -y
+
+# Install uefi-run utility
+RUN ~/.cargo/bin/cargo install uefi-run --root /usr
+
+# Install LLVM and Clang
+RUN wget ${WGET_ARGS} https://apt.llvm.org/llvm.sh && \
+	chmod +x llvm.sh && \
+	./llvm.sh ${LLVM_VERSION} all && \
+	rm -f llvm.sh
+
+# Install sparse package for static analysis
+RUN mkdir -p /opt/sparse && \
+	cd /opt/sparse && \
+	git clone https://git.kernel.org/pub/scm/devel/sparse/sparse.git && \
+	cd sparse && git checkout ${SPARSE_VERSION} && \
+	make -j8 && \
+	PREFIX=/opt/sparse make install && \
+	rm -rf /opt/sparse/sparse
+
+# Install protobuf-compiler
+RUN mkdir -p /opt/protoc && \
+	cd /opt/protoc && \
+	PROTOC_HOSTTYPE=$(case $HOSTTYPE in x86_64) echo "x86_64";; aarch64) echo "aarch_64";; esac) && \
+	wget ${WGET_ARGS} https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${PROTOC_HOSTTYPE}.zip && \
+	unzip protoc-${PROTOC_VERSION}-linux-${PROTOC_HOSTTYPE}.zip && \
+	ln -nsf /opt/protoc/bin/protoc /usr/local/bin && \
+	rm -f protoc-${PROTOC_VERSION}-linux-${PROTOC_HOSTTYPE}.zip
+
+# Install Zephyr SDK
+RUN mkdir -p /opt/toolchains && \
+	cd /opt/toolchains && \
+	wget ${WGET_ARGS} https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${ZSDK_VERSION}/zephyr-sdk-${ZSDK_VERSION}_linux-${HOSTTYPE}.tar.xz && \
+	tar xf zephyr-sdk-${ZSDK_VERSION}_linux-${HOSTTYPE}.tar.xz && \
+	zephyr-sdk-${ZSDK_VERSION}/setup.sh -t all -h -c && \
+	rm zephyr-sdk-${ZSDK_VERSION}_linux-${HOSTTYPE}.tar.xz
+
+# Clean up stale packages
+RUN apt-get clean -y && \
+	apt-get autoremove --purge -y && \
+	rm -rf /var/lib/apt/lists/*
+
+# Run the Zephyr SDK setup script as 'user' in order to ensure that the
+# `Zephyr-sdk` CMake package is located in the package registry under the
+# user's home directory.
+USER user
+
+RUN sudo -E -- bash -c ' \
+	/opt/toolchains/zephyr-sdk-${ZSDK_VERSION}/setup.sh -c && \
+	chown -R user:user /home/user/.cmake \
+	'
+
+USER root
+
+# Set the locale
+ENV ZEPHYR_TOOLCHAIN_VARIANT=zephyr
+ENV PKG_CONFIG_PATH=/usr/lib/i386-linux-gnu/pkgconfig
+ENV OVMF_FD_PATH=/usr/share/ovmf/OVMF.fd
+ENV ARMFVP_BIN_PATH=/usr/local/bin
